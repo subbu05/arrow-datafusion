@@ -30,9 +30,17 @@ STORED AS PARQUET
 LOCATION '/mnt/nyctaxi/tripdata.parquet';
 ```
 
-CSV data sources can also be registered by executing a `CREATE EXTERNAL TABLE` SQL statement. It is necessary to
-provide schema information for CSV files since DataFusion does not automatically infer the schema when using SQL
-to query CSV files.
+CSV data sources can also be registered by executing a `CREATE EXTERNAL TABLE` SQL statement. The schema will be
+inferred based on scanning a subset of the file.
+
+```sql
+CREATE EXTERNAL TABLE test
+STORED AS CSV
+WITH HEADER ROW
+LOCATION '/path/to/aggregate_simple.csv';
+```
+
+It is also possible to specify the schema manually.
 
 ```sql
 CREATE EXTERNAL TABLE test (
@@ -55,30 +63,59 @@ WITH HEADER ROW
 LOCATION '/path/to/aggregate_test_100.csv';
 ```
 
-## CREATE MEMORY TABLE
-
-Memory table can be created with query.
+If data sources are already partitioned in Hive style, `PARTITIONED BY` can be used for partition pruning.
 
 ```
-CREATE TABLE TABLE_NAME AS [SELECT | VALUES LIST]
+/mnt/nyctaxi/year=2022/month=01/tripdata.parquet
+/mnt/nyctaxi/year=2021/month=12/tripdata.parquet
+/mnt/nyctaxi/year=2021/month=11/tripdata.parquet
 ```
 
 ```sql
-CREATE TABLE valuetable AS VALUES(1,'HELLO'),(12,'DATAFUSION');
+CREATE EXTERNAL TABLE taxi
+STORED AS PARQUET
+PARTITIONED BY (year, month)
+LOCATION '/mnt/nyctaxi';
+```
+
+## CREATE TABLE
+
+An in-memory table can be created with a query or values list.
+
+<pre>
+CREATE [OR REPLACE] TABLE [IF NOT EXISTS] <b><i>table_name</i></b> AS [SELECT | VALUES LIST];
+</pre>
+
+```sql
+CREATE TABLE valuetable IF NOT EXISTS AS VALUES(1,'HELLO'),(12,'DATAFUSION');
 
 CREATE TABLE memtable as select * from valuetable;
 ```
 
 ## DROP TABLE
 
-The table can be deleted.
+Removes the table from DataFusion's catalog.
 
-```
-DROP TABLE [ IF EXISTS ] name
-```
+<pre>
+DROP TABLE [ IF EXISTS ] <b><i>table_name</i></b>;
+</pre>
 
 ```sql
 CREATE TABLE users AS VALUES(1,2),(2,3);
-
 DROP TABLE users;
+-- or use 'if exists' to silently ignore if the table doesn't exist
+DROP TABLE IF EXISTS nonexistent_table;
+```
+
+## DROP VIEW
+
+Removes the view from DataFusion's catalog.
+
+<pre>
+DROP VIEW [ IF EXISTS ] <b><i>view_name</i></b>;
+</pre>
+
+```sql
+-- drop users_v view from the customer_a schema
+DROP VIEW IF EXISTS customer_a.users_v;
 ```

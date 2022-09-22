@@ -39,7 +39,7 @@ CREATE_TABLE_SQL_FILE = "integration-tests/create_test_table.sql"
 def generate_csv_from_datafusion(fname: str):
     return subprocess.check_output(
         [
-            "./target/debug/datafusion-cli",
+            "./datafusion-cli/target/debug/datafusion-cli",
             "-f",
             CREATE_TABLE_SQL_FILE,
             "-f",
@@ -52,24 +52,29 @@ def generate_csv_from_datafusion(fname: str):
 
 
 def generate_csv_from_psql(fname: str):
-    return subprocess.check_output(
-        [
-            "psql",
-            "-d",
-            pg_db,
-            "-h",
-            pg_host,
-            "-p",
-            pg_port,
-            "-U",
-            pg_user,
-            "-X",
-            "--csv",
-            "-f",
-            fname,
-        ]
-    )
 
+    cmd = ["psql"]
+
+    if pg_db is not None:
+        cmd.extend(["-d", pg_db])
+
+    if pg_user is not None:
+        cmd.extend(["-U", pg_user])
+
+    if pg_host is not None:
+        cmd.extend(["-h", pg_host])
+
+    if pg_port is not None:
+        cmd.extend(["-p", pg_port])
+
+    cmd.extend([
+        "-X",
+        "--csv",
+        "-f",
+        fname,
+    ])
+
+    return subprocess.check_output(cmd)
 
 root = Path(os.path.dirname(__file__)) / "sqls"
 test_files = set(root.glob("*.sql"))
@@ -77,7 +82,7 @@ test_files = set(root.glob("*.sql"))
 
 class TestPsqlParity:
     def test_tests_count(self):
-        assert len(test_files) == 21, "tests are missed"
+        assert len(test_files) == 22, "tests are missed"
 
     @pytest.mark.parametrize("fname", test_files)
     def test_sql_file(self, fname):

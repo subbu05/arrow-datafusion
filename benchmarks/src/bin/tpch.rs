@@ -17,23 +17,17 @@
 
 //! Benchmark derived from TPC-H. This is not an official TPC-H benchmark.
 
-use futures::future::join_all;
-use rand::prelude::*;
-use std::ops::Div;
 use std::{
-    fs,
+    fs::{self, File},
+    io::Write,
     iter::Iterator,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
-
-use ballista::context::BallistaContext;
-use ballista::prelude::{BallistaConfig, BALLISTA_DEFAULT_SHUFFLE_PARTITIONS};
 
 use datafusion::datasource::{MemTable, TableProvider};
 use datafusion::error::{DataFusionError, Result};
-use datafusion::logical_plan::LogicalPlan;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
@@ -42,20 +36,20 @@ use datafusion::prelude::*;
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
     datasource::file_format::{csv::CsvFormat, FileFormat},
+    DATAFUSION_VERSION,
 };
 use datafusion::{
     arrow::record_batch::RecordBatch, datasource::file_format::parquet::ParquetFormat,
 };
 use datafusion::{
     arrow::util::pretty,
-    datasource::{
-        listing::{ListingOptions, ListingTable},
-        object_store::local::LocalFileSystem,
-    },
+    datasource::listing::{ListingOptions, ListingTable, ListingTableConfig},
 };
 
 use datafusion::datasource::file_format::csv::DEFAULT_CSV_EXTENSION;
 use datafusion::datasource::file_format::parquet::DEFAULT_PARQUET_EXTENSION;
+use datafusion::datasource::listing::ListingTableUrl;
+use serde::Serialize;
 use structopt::StructOpt;
 
 #[cfg(feature = "snmalloc")]
@@ -65,47 +59,6 @@ static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[derive(Debug, StructOpt, Clone)]
-struct BallistaBenchmarkOpt {
-    /// Query number
-    #[structopt(short, long)]
-    query: usize,
-
-    /// Activate debug mode to see query results
-    #[structopt(short, long)]
-    debug: bool,
-
-    /// Number of iterations of each test run
-    #[structopt(short = "i", long = "iterations", default_value = "3")]
-    iterations: usize,
-
-    // /// Batch size when reading CSV or Parquet files
-    // #[structopt(short = "s", long = "batch-size", default_value = "8192")]
-    // batch_size: usize,
-    /// Path to data files
-    #[structopt(parse(from_os_str), required = true, short = "p", long = "path")]
-    path: PathBuf,
-
-    /// File format: `csv` or `parquet`
-    #[structopt(short = "f", long = "format", default_value = "csv")]
-    file_format: String,
-
-    // /// Load the data into a MemTable before executing the query
-    // #[structopt(short = "m", long = "mem-table")]
-    // mem_table: bool,
-    /// Number of partitions to process in parallel
-    #[structopt(short = "n", long = "partitions", default_value = "2")]
-    partitions: usize,
-
-    /// Ballista executor host
-    #[structopt(long = "host")]
-    host: Option<String>,
-
-    /// Ballista executor port
-    #[structopt(long = "port")]
-    port: Option<u16>,
-}
 
 #[derive(Debug, StructOpt, Clone)]
 struct DataFusionBenchmarkOpt {
@@ -140,48 +93,10 @@ struct DataFusionBenchmarkOpt {
     /// Load the data into a MemTable before executing the query
     #[structopt(short = "m", long = "mem-table")]
     mem_table: bool,
-}
 
-#[derive(Debug, StructOpt, Clone)]
-struct BallistaLoadtestOpt {
-    #[structopt(short = "q", long)]
-    query_list: String,
-
-    /// Activate debug mode to see query results
-    #[structopt(short, long)]
-    debug: bool,
-
-    /// Number of requests
-    #[structopt(short = "r", long = "requests", default_value = "100")]
-    requests: usize,
-
-    /// Number of connections
-    #[structopt(short = "c", long = "concurrency", default_value = "5")]
-    concurrency: usize,
-
-    /// Number of partitions to process in parallel
-    #[structopt(short = "n", long = "partitions", default_value = "2")]
-    partitions: usize,
-
-    /// Path to data files
-    #[structopt(parse(from_os_str), required = true, short = "p", long = "data-path")]
-    path: PathBuf,
-
-    /// Path to sql files
-    #[structopt(parse(from_os_str), required = true, long = "sql-path")]
-    sql_path: PathBuf,
-
-    /// File format: `csv` or `parquet`
-    #[structopt(short = "f", long = "format", default_value = "parquet")]
-    file_format: String,
-
-    /// Ballista executor host
-    #[structopt(long = "host")]
-    host: Option<String>,
-
-    /// Ballista executor port
-    #[structopt(long = "port")]
-    port: Option<u16>,
+    /// Path to output directory where JSON summary file should be written to
+    #[structopt(parse(from_os_str), short = "o", long = "output")]
+    output_path: Option<PathBuf>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -214,17 +129,8 @@ struct ConvertOpt {
 #[derive(Debug, StructOpt)]
 #[structopt(about = "benchmark command")]
 enum BenchmarkSubCommandOpt {
-    #[structopt(name = "ballista")]
-    BallistaBenchmark(BallistaBenchmarkOpt),
     #[structopt(name = "datafusion")]
     DataFusionBenchmark(DataFusionBenchmarkOpt),
-}
-
-#[derive(Debug, StructOpt)]
-#[structopt(about = "loadtest command")]
-enum LoadtestOpt {
-    #[structopt(name = "ballista-load")]
-    BallistaLoadtest(BallistaLoadtestOpt),
 }
 
 #[derive(Debug, StructOpt)]
@@ -232,7 +138,6 @@ enum LoadtestOpt {
 enum TpchOpt {
     Benchmark(BenchmarkSubCommandOpt),
     Convert(ConvertOpt),
-    Loadtest(LoadtestOpt),
 }
 
 const TABLES: &[&str] = &[
@@ -242,30 +147,23 @@ const TABLES: &[&str] = &[
 #[tokio::main]
 async fn main() -> Result<()> {
     use BenchmarkSubCommandOpt::*;
-    use LoadtestOpt::*;
 
     env_logger::init();
     match TpchOpt::from_args() {
-        TpchOpt::Benchmark(BallistaBenchmark(opt)) => {
-            benchmark_ballista(opt).await.map(|_| ())
-        }
         TpchOpt::Benchmark(DataFusionBenchmark(opt)) => {
             benchmark_datafusion(opt).await.map(|_| ())
         }
         TpchOpt::Convert(opt) => convert_tbl(opt).await,
-        TpchOpt::Loadtest(BallistaLoadtest(opt)) => {
-            loadtest_ballista(opt).await.map(|_| ())
-        }
     }
 }
 
 async fn benchmark_datafusion(opt: DataFusionBenchmarkOpt) -> Result<Vec<RecordBatch>> {
     println!("Running benchmarks with the following options: {:?}", opt);
-    let config = ExecutionConfig::new()
+    let mut benchmark_run = BenchmarkRun::new(opt.query);
+    let config = SessionConfig::new()
         .with_target_partitions(opt.partitions)
         .with_batch_size(opt.batch_size);
-    let mut ctx = ExecutionContext::with_config(config);
-    let runtime = ctx.state.lock().unwrap().runtime_env.clone();
+    let ctx = SessionContext::with_config(config);
 
     // register tables
     for table in TABLES {
@@ -278,9 +176,8 @@ async fn benchmark_datafusion(opt: DataFusionBenchmarkOpt) -> Result<Vec<RecordB
         if opt.mem_table {
             println!("Loading table '{}' into memory", table);
             let start = Instant::now();
-
             let memtable =
-                MemTable::load(table_provider, Some(opt.partitions), runtime.clone())
+                MemTable::load(table_provider, Some(opt.partitions), &ctx.state())
                     .await?;
             println!(
                 "Loaded table '{}' into memory in {} ms",
@@ -298,246 +195,108 @@ async fn benchmark_datafusion(opt: DataFusionBenchmarkOpt) -> Result<Vec<RecordB
     let mut result: Vec<RecordBatch> = Vec::with_capacity(1);
     for i in 0..opt.iterations {
         let start = Instant::now();
-        let plan = create_logical_plan(&mut ctx, opt.query)?;
-        result = execute_query(&mut ctx, &plan, opt.debug).await?;
+
+        let sql = &get_query_sql(opt.query)?;
+
+        // query 15 is special, with 3 statements. the second statement is the one from which we
+        // want to capture the results
+        if opt.query == 15 {
+            for (n, query) in sql.iter().enumerate() {
+                if n == 1 {
+                    result = execute_query(&ctx, query, opt.debug).await?;
+                } else {
+                    execute_query(&ctx, query, opt.debug).await?;
+                }
+            }
+        } else {
+            for query in sql {
+                result = execute_query(&ctx, query, opt.debug).await?;
+            }
+        }
+
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
         millis.push(elapsed as f64);
-        println!("Query {} iteration {} took {:.1} ms", opt.query, i, elapsed);
+        let row_count = result.iter().map(|b| b.num_rows()).sum();
+        println!(
+            "Query {} iteration {} took {:.1} ms and returned {} rows",
+            opt.query, i, elapsed, row_count
+        );
+        benchmark_run.add_result(elapsed, row_count);
     }
 
     let avg = millis.iter().sum::<f64>() / millis.len() as f64;
     println!("Query {} avg time: {:.2} ms", opt.query, avg);
+
+    if let Some(path) = &opt.output_path {
+        write_summary_json(&mut benchmark_run, path)?;
+    }
 
     Ok(result)
 }
 
-async fn benchmark_ballista(opt: BallistaBenchmarkOpt) -> Result<()> {
-    println!("Running benchmarks with the following options: {:?}", opt);
-
-    let config = BallistaConfig::builder()
-        .set(
-            BALLISTA_DEFAULT_SHUFFLE_PARTITIONS,
-            &format!("{}", opt.partitions),
-        )
-        .build()
-        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
-
-    let ctx =
-        BallistaContext::remote(opt.host.unwrap().as_str(), opt.port.unwrap(), &config);
-
-    // register tables with Ballista context
-    let path = opt.path.to_str().unwrap();
-    let file_format = opt.file_format.as_str();
-
-    register_tables(path, file_format, &ctx).await;
-
-    let mut millis = vec![];
-
-    // run benchmark
-    let sql = get_query_sql(opt.query)?;
-    println!("Running benchmark with query {}:\n {}", opt.query, sql);
-    for i in 0..opt.iterations {
-        let start = Instant::now();
-        let df = ctx
-            .sql(&sql)
-            .await
-            .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-            .unwrap();
-        let batches = df
-            .collect()
-            .await
-            .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-            .unwrap();
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        millis.push(elapsed as f64);
-        println!("Query {} iteration {} took {:.1} ms", opt.query, i, elapsed);
-        if opt.debug {
-            pretty::print_batches(&batches)?;
-        }
-    }
-
-    let avg = millis.iter().sum::<f64>() / millis.len() as f64;
-    println!("Query {} avg time: {:.2} ms", opt.query, avg);
-
-    Ok(())
-}
-
-async fn loadtest_ballista(opt: BallistaLoadtestOpt) -> Result<()> {
-    println!(
-        "Running loadtest_ballista with the following options: {:?}",
-        opt
+fn write_summary_json(benchmark_run: &mut BenchmarkRun, path: &Path) -> Result<()> {
+    let json =
+        serde_json::to_string_pretty(&benchmark_run).expect("summary is serializable");
+    let filename = format!(
+        "tpch-q{}-{}.json",
+        benchmark_run.query, benchmark_run.start_time
     );
-
-    let config = BallistaConfig::builder()
-        .set(
-            BALLISTA_DEFAULT_SHUFFLE_PARTITIONS,
-            &format!("{}", opt.partitions),
-        )
-        .build()
-        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
-
-    let concurrency = opt.concurrency;
-    let request_amount = opt.requests;
-    let mut clients = vec![];
-
-    for _num in 0..concurrency {
-        clients.push(BallistaContext::remote(
-            opt.host.clone().unwrap().as_str(),
-            opt.port.unwrap(),
-            &config,
-        ));
-    }
-
-    // register tables with Ballista context
-    let path = opt.path.to_str().unwrap();
-    let file_format = opt.file_format.as_str();
-    let sql_path = opt.sql_path.to_str().unwrap().to_string();
-
-    for ctx in &clients {
-        register_tables(path, file_format, ctx).await;
-    }
-
-    let request_per_thread = request_amount.div(concurrency);
-    // run benchmark
-    let query_list: Vec<usize> = opt
-        .query_list
-        .split(',')
-        .map(|s| s.parse().unwrap())
-        .collect();
-    println!("query list: {:?} ", &query_list);
-
-    let total = Instant::now();
-    let mut futures = vec![];
-
-    for (client_id, client) in clients.into_iter().enumerate() {
-        let query_list_clone = query_list.clone();
-        let sql_path_clone = sql_path.clone();
-        let handle = tokio::spawn(async move {
-            for i in 0..request_per_thread {
-                let query_id = query_list_clone
-                    .get(
-                        (0..query_list_clone.len())
-                            .choose(&mut rand::thread_rng())
-                            .unwrap(),
-                    )
-                    .unwrap();
-                let sql =
-                    get_query_sql_by_path(query_id.to_owned(), sql_path_clone.clone())
-                        .unwrap();
-                println!(
-                    "Client {} Round {} Query {} started",
-                    &client_id, &i, query_id
-                );
-                let start = Instant::now();
-                let df = client
-                    .sql(&sql)
-                    .await
-                    .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-                    .unwrap();
-                let batches = df
-                    .collect()
-                    .await
-                    .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-                    .unwrap();
-                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                println!(
-                    "Client {} Round {} Query {} took {:.1} ms ",
-                    &client_id, &i, query_id, elapsed
-                );
-                if opt.debug {
-                    pretty::print_batches(&batches).unwrap();
-                }
-            }
-        });
-        futures.push(handle);
-    }
-    join_all(futures).await;
-    let elapsed = total.elapsed().as_secs_f64() * 1000.0;
-    println!("###############################");
-    println!("load test  took {:.1} ms", elapsed);
+    let path = path.join(filename);
+    println!(
+        "Writing summary file to {}",
+        path.as_os_str().to_str().unwrap()
+    );
+    let mut file = File::create(path)?;
+    file.write_all(json.as_bytes())?;
     Ok(())
 }
 
-fn get_query_sql_by_path(query: usize, mut sql_path: String) -> Result<String> {
-    if sql_path.ends_with('/') {
-        sql_path.pop();
-    }
+/// Get the SQL statements from the specified query file
+fn get_query_sql(query: usize) -> Result<Vec<String>> {
     if query > 0 && query < 23 {
-        let filename = format!("{}/q{}.sql", sql_path, query);
-        Ok(fs::read_to_string(&filename).expect("failed to read query"))
-    } else {
-        Err(DataFusionError::Plan(
-            "invalid query. Expected value between 1 and 22".to_owned(),
-        ))
-    }
-}
-
-async fn register_tables(path: &str, file_format: &str, ctx: &BallistaContext) {
-    for table in TABLES {
-        match file_format {
-            // dbgen creates .tbl ('|' delimited) files without header
-            "tbl" => {
-                let path = format!("{}/{}.tbl", path, table);
-                let schema = get_schema(table);
-                let options = CsvReadOptions::new()
-                    .schema(&schema)
-                    .delimiter(b'|')
-                    .has_header(false)
-                    .file_extension(".tbl");
-                ctx.register_csv(table, &path, options)
-                    .await
-                    .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-                    .unwrap();
-            }
-            "csv" => {
-                let path = format!("{}/{}", path, table);
-                let schema = get_schema(table);
-                let options = CsvReadOptions::new().schema(&schema).has_header(true);
-                ctx.register_csv(table, &path, options)
-                    .await
-                    .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-                    .unwrap();
-            }
-            "parquet" => {
-                let path = format!("{}/{}", path, table);
-                ctx.register_parquet(table, &path)
-                    .await
-                    .map_err(|e| DataFusionError::Plan(format!("{:?}", e)))
-                    .unwrap();
-            }
-            other => {
-                unimplemented!("Invalid file format '{}'", other);
-            }
+        let possibilities = vec![
+            format!("queries/q{}.sql", query),
+            format!("benchmarks/queries/q{}.sql", query),
+        ];
+        let mut errors = vec![];
+        for filename in possibilities {
+            match fs::read_to_string(&filename) {
+                Ok(contents) => {
+                    return Ok(contents
+                        .split(';')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect());
+                }
+                Err(e) => errors.push(format!("{}: {}", filename, e)),
+            };
         }
-    }
-}
-
-fn get_query_sql(query: usize) -> Result<String> {
-    if query > 0 && query < 23 {
-        let filename = format!("queries/q{}.sql", query);
-        Ok(fs::read_to_string(&filename).expect("failed to read query"))
+        Err(DataFusionError::Plan(format!(
+            "invalid query. Could not find query: {:?}",
+            errors
+        )))
     } else {
         Err(DataFusionError::Plan(
             "invalid query. Expected value between 1 and 22".to_owned(),
         ))
     }
-}
-
-fn create_logical_plan(ctx: &mut ExecutionContext, query: usize) -> Result<LogicalPlan> {
-    let sql = get_query_sql(query)?;
-    ctx.create_logical_plan(&sql)
 }
 
 async fn execute_query(
-    ctx: &mut ExecutionContext,
-    plan: &LogicalPlan,
+    ctx: &SessionContext,
+    sql: &str,
     debug: bool,
 ) -> Result<Vec<RecordBatch>> {
+    let plan = ctx.sql(sql).await?;
+    let plan = plan.to_logical_plan()?;
+
     if debug {
         println!("=== Logical plan ===\n{:?}\n", plan);
     }
-    let plan = ctx.optimize(plan)?;
+
     if debug {
+        let plan = ctx.optimize(&plan)?;
         println!("=== Optimized logical plan ===\n{:?}\n", plan);
     }
     let physical_plan = ctx.create_physical_plan(&plan).await?;
@@ -547,8 +306,8 @@ async fn execute_query(
             displayable(physical_plan.as_ref()).indent()
         );
     }
-    let runtime = ctx.state.lock().unwrap().runtime_env.clone();
-    let result = collect(physical_plan.clone(), runtime).await?;
+    let task_ctx = ctx.task_ctx();
+    let result = collect(physical_plan.clone(), task_ctx).await?;
     if debug {
         println!(
             "=== Physical plan with metrics ===\n{}\n",
@@ -571,8 +330,8 @@ async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
             .delimiter(b'|')
             .file_extension(".tbl");
 
-        let config = ExecutionConfig::new().with_batch_size(opt.batch_size);
-        let mut ctx = ExecutionContext::with_config(config);
+        let config = SessionConfig::new().with_batch_size(opt.batch_size);
+        let ctx = SessionContext::with_config(config);
 
         // build plan to read the TBL file
         let mut csv = ctx.read_csv(&input_path, options).await?;
@@ -583,8 +342,7 @@ async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
         }
 
         // create the physical plan
-        let csv = csv.to_logical_plan();
-        let csv = ctx.optimize(&csv)?;
+        let csv = csv.to_logical_plan()?;
         let csv = ctx.create_physical_plan(&csv).await?;
 
         let output_path = output_root_path.join(table);
@@ -609,7 +367,7 @@ async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
                         return Err(DataFusionError::NotImplemented(format!(
                             "Invalid compression format: {}",
                             other
-                        )))
+                        )));
                     }
                 };
                 let props = WriterProperties::builder()
@@ -621,7 +379,7 @@ async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
                 return Err(DataFusionError::NotImplemented(format!(
                     "Invalid output format: {}",
                     other
-                )))
+                )));
             }
         }
         println!("Conversion completed in {} ms", start.elapsed().as_millis());
@@ -676,12 +434,12 @@ fn get_table(
         table_partition_cols: vec![],
     };
 
-    Ok(Arc::new(ListingTable::new(
-        Arc::new(LocalFileSystem {}),
-        path,
-        schema,
-        options,
-    )))
+    let table_path = ListingTableUrl::parse(path)?;
+    let config = ListingTableConfig::new(table_path)
+        .with_listing_options(options)
+        .with_schema(schema);
+
+    Ok(Arc::new(ListingTable::try_new(config)?))
 }
 
 fn get_schema(table: &str) -> Schema {
@@ -698,7 +456,7 @@ fn get_schema(table: &str) -> Schema {
             Field::new("p_type", DataType::Utf8, false),
             Field::new("p_size", DataType::Int32, false),
             Field::new("p_container", DataType::Utf8, false),
-            Field::new("p_retailprice", DataType::Float64, false),
+            Field::new("p_retailprice", DataType::Decimal128(15, 2), false),
             Field::new("p_comment", DataType::Utf8, false),
         ]),
 
@@ -708,7 +466,7 @@ fn get_schema(table: &str) -> Schema {
             Field::new("s_address", DataType::Utf8, false),
             Field::new("s_nationkey", DataType::Int64, false),
             Field::new("s_phone", DataType::Utf8, false),
-            Field::new("s_acctbal", DataType::Float64, false),
+            Field::new("s_acctbal", DataType::Decimal128(15, 2), false),
             Field::new("s_comment", DataType::Utf8, false),
         ]),
 
@@ -716,7 +474,7 @@ fn get_schema(table: &str) -> Schema {
             Field::new("ps_partkey", DataType::Int64, false),
             Field::new("ps_suppkey", DataType::Int64, false),
             Field::new("ps_availqty", DataType::Int32, false),
-            Field::new("ps_supplycost", DataType::Float64, false),
+            Field::new("ps_supplycost", DataType::Decimal128(15, 2), false),
             Field::new("ps_comment", DataType::Utf8, false),
         ]),
 
@@ -726,7 +484,7 @@ fn get_schema(table: &str) -> Schema {
             Field::new("c_address", DataType::Utf8, false),
             Field::new("c_nationkey", DataType::Int64, false),
             Field::new("c_phone", DataType::Utf8, false),
-            Field::new("c_acctbal", DataType::Float64, false),
+            Field::new("c_acctbal", DataType::Decimal128(15, 2), false),
             Field::new("c_mktsegment", DataType::Utf8, false),
             Field::new("c_comment", DataType::Utf8, false),
         ]),
@@ -735,7 +493,7 @@ fn get_schema(table: &str) -> Schema {
             Field::new("o_orderkey", DataType::Int64, false),
             Field::new("o_custkey", DataType::Int64, false),
             Field::new("o_orderstatus", DataType::Utf8, false),
-            Field::new("o_totalprice", DataType::Float64, false),
+            Field::new("o_totalprice", DataType::Decimal128(15, 2), false),
             Field::new("o_orderdate", DataType::Date32, false),
             Field::new("o_orderpriority", DataType::Utf8, false),
             Field::new("o_clerk", DataType::Utf8, false),
@@ -748,10 +506,10 @@ fn get_schema(table: &str) -> Schema {
             Field::new("l_partkey", DataType::Int64, false),
             Field::new("l_suppkey", DataType::Int64, false),
             Field::new("l_linenumber", DataType::Int32, false),
-            Field::new("l_quantity", DataType::Float64, false),
-            Field::new("l_extendedprice", DataType::Float64, false),
-            Field::new("l_discount", DataType::Float64, false),
-            Field::new("l_tax", DataType::Float64, false),
+            Field::new("l_quantity", DataType::Decimal128(15, 2), false),
+            Field::new("l_extendedprice", DataType::Decimal128(15, 2), false),
+            Field::new("l_discount", DataType::Decimal128(15, 2), false),
+            Field::new("l_tax", DataType::Decimal128(15, 2), false),
             Field::new("l_returnflag", DataType::Utf8, false),
             Field::new("l_linestatus", DataType::Utf8, false),
             Field::new("l_shipdate", DataType::Date32, false),
@@ -779,16 +537,91 @@ fn get_schema(table: &str) -> Schema {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct BenchmarkRun {
+    /// Benchmark crate version
+    benchmark_version: String,
+    /// DataFusion crate version
+    datafusion_version: String,
+    /// Number of CPU cores
+    num_cpus: usize,
+    /// Start time
+    start_time: u64,
+    /// CLI arguments
+    arguments: Vec<String>,
+    /// query number
+    query: usize,
+    /// list of individual run times and row counts
+    iterations: Vec<QueryResult>,
+}
+
+impl BenchmarkRun {
+    fn new(query: usize) -> Self {
+        Self {
+            benchmark_version: env!("CARGO_PKG_VERSION").to_owned(),
+            datafusion_version: DATAFUSION_VERSION.to_owned(),
+            num_cpus: num_cpus::get(),
+            start_time: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("current time is later than UNIX_EPOCH")
+                .as_secs(),
+            arguments: std::env::args()
+                .skip(1)
+                .into_iter()
+                .collect::<Vec<String>>(),
+            query,
+            iterations: vec![],
+        }
+    }
+
+    fn add_result(&mut self, elapsed: f64, row_count: usize) {
+        self.iterations.push(QueryResult { elapsed, row_count })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct QueryResult {
+    elapsed: f64,
+    row_count: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+    use std::ops::{Div, Mul};
     use std::sync::Arc;
 
     use datafusion::arrow::array::*;
     use datafusion::arrow::util::display::array_value_to_string;
-    use datafusion::logical_plan::Expr;
-    use datafusion::logical_plan::Expr::Cast;
+    use datafusion::logical_expr::Expr;
+    use datafusion::logical_expr::Expr::Cast;
+    use datafusion::logical_expr::Expr::ScalarFunction;
+
+    const QUERY_LIMIT: [Option<usize>; 22] = [
+        None,
+        Some(100),
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(20),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(100),
+        None,
+        None,
+        Some(100),
+        None,
+    ];
 
     #[tokio::test]
     async fn q1() -> Result<()> {
@@ -906,8 +739,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_q2() -> Result<()> {
+        run_query(2).await
+    }
+
+    #[tokio::test]
     async fn run_q3() -> Result<()> {
         run_query(3).await
+    }
+
+    #[tokio::test]
+    async fn run_q4() -> Result<()> {
+        run_query(4).await
     }
 
     #[tokio::test]
@@ -941,6 +784,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_q11() -> Result<()> {
+        run_query(11).await
+    }
+
+    #[tokio::test]
     async fn run_q12() -> Result<()> {
         run_query(12).await
     }
@@ -956,29 +804,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_q15() -> Result<()> {
+        run_query(15).await
+    }
+
+    #[tokio::test]
+    async fn run_q16() -> Result<()> {
+        run_query(16).await
+    }
+
+    #[tokio::test]
+    async fn run_q17() -> Result<()> {
+        run_query(17).await
+    }
+
+    #[tokio::test]
+    async fn run_q18() -> Result<()> {
+        run_query(18).await
+    }
+
+    #[tokio::test]
     async fn run_q19() -> Result<()> {
         run_query(19).await
+    }
+
+    #[tokio::test]
+    async fn run_q20() -> Result<()> {
+        run_query(20).await
+    }
+
+    #[tokio::test]
+    async fn run_q21() -> Result<()> {
+        run_query(21).await
+    }
+
+    #[tokio::test]
+    async fn run_q22() -> Result<()> {
+        run_query(22).await
     }
 
     /// Specialised String representation
     fn col_str(column: &ArrayRef, row_index: usize) -> String {
         if column.is_null(row_index) {
             return "NULL".to_string();
-        }
-
-        // Special case ListArray as there is no pretty print support for it yet
-        if let DataType::FixedSizeList(_, n) = column.data_type() {
-            let array = column
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .unwrap()
-                .value(row_index);
-
-            let mut r = Vec::with_capacity(*n as usize);
-            for i in 0..*n {
-                r.push(col_str(&array, i as usize));
-            }
-            return format!("[{}]", r.join(","));
         }
 
         array_value_to_string(column, row_index).unwrap()
@@ -1006,21 +874,21 @@ mod tests {
             1 => Schema::new(vec![
                 Field::new("l_returnflag", DataType::Utf8, true),
                 Field::new("l_linestatus", DataType::Utf8, true),
-                Field::new("sum_qty", DataType::Float64, true),
-                Field::new("sum_base_price", DataType::Float64, true),
-                Field::new("sum_disc_price", DataType::Float64, true),
-                Field::new("sum_charge", DataType::Float64, true),
-                Field::new("avg_qty", DataType::Float64, true),
-                Field::new("avg_price", DataType::Float64, true),
-                Field::new("avg_disc", DataType::Float64, true),
-                Field::new("count_order", DataType::UInt64, true),
+                Field::new("sum_qty", DataType::Decimal128(15, 2), true),
+                Field::new("sum_base_price", DataType::Decimal128(15, 2), true),
+                Field::new("sum_disc_price", DataType::Decimal128(15, 2), true),
+                Field::new("sum_charge", DataType::Decimal128(15, 2), true),
+                Field::new("avg_qty", DataType::Decimal128(15, 2), true),
+                Field::new("avg_price", DataType::Decimal128(15, 2), true),
+                Field::new("avg_disc", DataType::Decimal128(15, 2), true),
+                Field::new("count_order", DataType::Int64, true),
             ]),
 
             2 => Schema::new(vec![
-                Field::new("s_acctbal", DataType::Float64, true),
+                Field::new("s_acctbal", DataType::Decimal128(15, 2), true),
                 Field::new("s_name", DataType::Utf8, true),
                 Field::new("n_name", DataType::Utf8, true),
-                Field::new("p_partkey", DataType::Int32, true),
+                Field::new("p_partkey", DataType::Int64, true),
                 Field::new("p_mfgr", DataType::Utf8, true),
                 Field::new("s_address", DataType::Utf8, true),
                 Field::new("s_phone", DataType::Utf8, true),
@@ -1028,47 +896,51 @@ mod tests {
             ]),
 
             3 => Schema::new(vec![
-                Field::new("l_orderkey", DataType::Int32, true),
-                Field::new("revenue", DataType::Float64, true),
+                Field::new("l_orderkey", DataType::Int64, true),
+                Field::new("revenue", DataType::Decimal128(15, 2), true),
                 Field::new("o_orderdate", DataType::Date32, true),
                 Field::new("o_shippriority", DataType::Int32, true),
             ]),
 
             4 => Schema::new(vec![
                 Field::new("o_orderpriority", DataType::Utf8, true),
-                Field::new("order_count", DataType::Int32, true),
+                Field::new("order_count", DataType::Int64, true),
             ]),
 
             5 => Schema::new(vec![
                 Field::new("n_name", DataType::Utf8, true),
-                Field::new("revenue", DataType::Float64, true),
+                Field::new("revenue", DataType::Decimal128(15, 2), true),
             ]),
 
-            6 => Schema::new(vec![Field::new("revenue", DataType::Float64, true)]),
+            6 => Schema::new(vec![Field::new(
+                "revenue",
+                DataType::Decimal128(15, 2),
+                true,
+            )]),
 
             7 => Schema::new(vec![
                 Field::new("supp_nation", DataType::Utf8, true),
                 Field::new("cust_nation", DataType::Utf8, true),
                 Field::new("l_year", DataType::Int32, true),
-                Field::new("revenue", DataType::Float64, true),
+                Field::new("revenue", DataType::Decimal128(15, 2), true),
             ]),
 
             8 => Schema::new(vec![
                 Field::new("o_year", DataType::Int32, true),
-                Field::new("mkt_share", DataType::Float64, true),
+                Field::new("mkt_share", DataType::Decimal128(15, 2), true),
             ]),
 
             9 => Schema::new(vec![
                 Field::new("nation", DataType::Utf8, true),
                 Field::new("o_year", DataType::Int32, true),
-                Field::new("sum_profit", DataType::Float64, true),
+                Field::new("sum_profit", DataType::Decimal128(15, 2), true),
             ]),
 
             10 => Schema::new(vec![
-                Field::new("c_custkey", DataType::Int32, true),
+                Field::new("c_custkey", DataType::Int64, true),
                 Field::new("c_name", DataType::Utf8, true),
-                Field::new("revenue", DataType::Float64, true),
-                Field::new("c_acctbal", DataType::Float64, true),
+                Field::new("revenue", DataType::Decimal128(15, 2), true),
+                Field::new("c_acctbal", DataType::Decimal128(15, 2), true),
                 Field::new("n_name", DataType::Utf8, true),
                 Field::new("c_address", DataType::Utf8, true),
                 Field::new("c_phone", DataType::Utf8, true),
@@ -1076,8 +948,8 @@ mod tests {
             ]),
 
             11 => Schema::new(vec![
-                Field::new("ps_partkey", DataType::Int32, true),
-                Field::new("value", DataType::Float64, true),
+                Field::new("ps_partkey", DataType::Int64, true),
+                Field::new("value", DataType::Decimal128(15, 2), true),
             ]),
 
             12 => Schema::new(vec![
@@ -1093,27 +965,37 @@ mod tests {
 
             14 => Schema::new(vec![Field::new("promo_revenue", DataType::Float64, true)]),
 
-            15 => Schema::new(vec![Field::new("promo_revenue", DataType::Float64, true)]),
+            15 => Schema::new(vec![
+                Field::new("s_suppkey", DataType::Int64, true),
+                Field::new("s_name", DataType::Utf8, true),
+                Field::new("s_address", DataType::Utf8, true),
+                Field::new("s_phone", DataType::Utf8, true),
+                Field::new("total_revenue", DataType::Decimal128(15, 2), true),
+            ]),
 
             16 => Schema::new(vec![
                 Field::new("p_brand", DataType::Utf8, true),
                 Field::new("p_type", DataType::Utf8, true),
-                Field::new("c_phone", DataType::Int32, true),
-                Field::new("c_comment", DataType::Int32, true),
+                Field::new("p_size", DataType::Int32, true),
+                Field::new("supplier_cnt", DataType::Int64, true),
             ]),
 
             17 => Schema::new(vec![Field::new("avg_yearly", DataType::Float64, true)]),
 
             18 => Schema::new(vec![
                 Field::new("c_name", DataType::Utf8, true),
-                Field::new("c_custkey", DataType::Int32, true),
-                Field::new("o_orderkey", DataType::Int32, true),
+                Field::new("c_custkey", DataType::Int64, true),
+                Field::new("o_orderkey", DataType::Int64, true),
                 Field::new("o_orderdate", DataType::Date32, true),
-                Field::new("o_totalprice", DataType::Float64, true),
-                Field::new("sum_l_quantity", DataType::Float64, true),
+                Field::new("o_totalprice", DataType::Decimal128(15, 2), true),
+                Field::new("sum_l_quantity", DataType::Decimal128(15, 2), true),
             ]),
 
-            19 => Schema::new(vec![Field::new("revenue", DataType::Float64, true)]),
+            19 => Schema::new(vec![Field::new(
+                "revenue",
+                DataType::Decimal128(15, 2),
+                true,
+            )]),
 
             20 => Schema::new(vec![
                 Field::new("s_name", DataType::Utf8, true),
@@ -1122,13 +1004,13 @@ mod tests {
 
             21 => Schema::new(vec![
                 Field::new("s_name", DataType::Utf8, true),
-                Field::new("numwait", DataType::Int32, true),
+                Field::new("numwait", DataType::Int64, true),
             ]),
 
             22 => Schema::new(vec![
-                Field::new("cntrycode", DataType::Int32, true),
-                Field::new("numcust", DataType::Int32, true),
-                Field::new("totacctbal", DataType::Float64, true),
+                Field::new("cntrycode", DataType::Utf8, true),
+                Field::new("numcust", DataType::Int64, true),
+                Field::new("totacctbal", DataType::Decimal128(15, 2), true),
             ]),
 
             _ => unimplemented!(),
@@ -1153,31 +1035,68 @@ mod tests {
         )
     }
 
-    // convert the schema to the same but with all columns set to nullable=true.
-    // this allows direct schema comparison ignoring nullable.
-    fn nullable_schema(schema: Arc<Schema>) -> Schema {
-        Schema::new(
-            schema
-                .fields()
-                .iter()
-                .map(|field| {
-                    Field::new(
-                        Field::name(field),
-                        Field::data_type(field).to_owned(),
-                        true,
-                    )
-                })
-                .collect::<Vec<Field>>(),
-        )
+    async fn transform_actual_result(
+        result: Vec<RecordBatch>,
+        n: usize,
+    ) -> Result<Vec<RecordBatch>> {
+        // to compare the recorded answers to the answers we got back from running the query,
+        // we need to round the decimal columns and trim the Utf8 columns
+        let ctx = SessionContext::new();
+        let result_schema = result[0].schema();
+        let table = Arc::new(MemTable::try_new(result_schema.clone(), vec![result])?);
+        let mut df = ctx.read_table(table)?
+            .select(
+                result_schema
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        match Field::data_type(field) {
+                            DataType::Decimal128(_,_) => {
+                                // if decimal, then round it to 2 decimal places like the answers
+                                // round() doesn't support the second argument for decimal places to round to
+                                // this can be simplified to remove the mul and div when 
+                                // https://github.com/apache/arrow-datafusion/issues/2420 is completed
+                                // cast it back to an over-sized Decimal with 2 precision when done rounding
+                                let round = Box::new(ScalarFunction {
+                                    fun: datafusion::logical_expr::BuiltinScalarFunction::Round,
+                                    args: vec![col(Field::name(field)).mul(lit(100))]
+                                }.div(lit(100)));
+                                Expr::Alias(
+                                    Box::new(Cast {
+                                        expr: round,
+                                        data_type: DataType::Decimal128(38,2),
+                                    }),
+                                    Field::name(field).to_string(),
+                                )
+                            }
+                            DataType::Utf8 => {
+                                // if string, then trim it like the answers got trimmed
+                                Expr::Alias(
+                                    Box::new(trim(col(Field::name(field)))),
+                                    Field::name(field).to_string()
+                                )
+                            }
+                            _ => {
+                                col(Field::name(field))
+                            }
+                        }
+                    }).collect()
+            )?;
+        if let Some(x) = QUERY_LIMIT[n - 1] {
+            df = df.limit(0, Some(x))?;
+        }
+
+        let df = df.collect().await?;
+        Ok(df)
     }
 
     async fn run_query(n: usize) -> Result<()> {
-        // Tests running query with empty tables, to see whether they run succesfully.
+        // Tests running query with empty tables, to see whether they run successfully.
 
-        let config = ExecutionConfig::new()
+        let config = SessionConfig::new()
             .with_target_partitions(1)
             .with_batch_size(10);
-        let mut ctx = ExecutionContext::with_config(config);
+        let ctx = SessionContext::with_config(config);
 
         for &table in TABLES {
             let schema = get_schema(table);
@@ -1188,18 +1107,25 @@ mod tests {
             ctx.register_table(table, Arc::new(provider))?;
         }
 
-        let plan = create_logical_plan(&mut ctx, n)?;
-        execute_query(&mut ctx, &plan, false).await?;
+        let sql = &get_query_sql(n)?;
+        for query in sql {
+            execute_query(&ctx, query, false).await?;
+        }
 
         Ok(())
     }
 
+    /// compares query results against stored answers from the git repo
+    /// verifies that:
+    ///  * datatypes returned in columns is correct
+    ///  * the correct number of rows are returned
+    ///  * the content of the rows is correct
     async fn verify_query(n: usize) -> Result<()> {
         if let Ok(path) = env::var("TPCH_DATA") {
             // load expected answers from tpch-dbgen
             // read csv as all strings, trim and cast to expected type as the csv string
             // to value parser does not handle data with leading/trailing spaces
-            let mut ctx = ExecutionContext::new();
+            let ctx = SessionContext::new();
             let schema = string_schema(get_answer_schema(n));
             let options = CsvReadOptions::new()
                 .schema(&schema)
@@ -1213,13 +1139,30 @@ mod tests {
                     .fields()
                     .iter()
                     .map(|field| {
-                        Expr::Alias(
-                            Box::new(Cast {
-                                expr: Box::new(trim(col(Field::name(field)))),
-                                data_type: Field::data_type(field).to_owned(),
-                            }),
-                            Field::name(field).to_string(),
-                        )
+                        match Field::data_type(field) {
+                            DataType::Decimal128(_, _) => {
+                                // there's no support for casting from Utf8 to Decimal, so
+                                // we'll cast from Utf8 to Float64 to Decimal for Decimal types
+                                let inner_cast = Box::new(Cast {
+                                    expr: Box::new(trim(col(Field::name(field)))),
+                                    data_type: DataType::Float64,
+                                });
+                                Expr::Alias(
+                                    Box::new(Cast {
+                                        expr: inner_cast,
+                                        data_type: Field::data_type(field).to_owned(),
+                                    }),
+                                    Field::name(field).to_string(),
+                                )
+                            }
+                            _ => Expr::Alias(
+                                Box::new(Cast {
+                                    expr: Box::new(trim(col(Field::name(field)))),
+                                    data_type: Field::data_type(field).to_owned(),
+                                }),
+                                Field::name(field).to_string(),
+                            ),
+                        }
                     })
                     .collect::<Vec<Expr>>(),
             )?;
@@ -1235,23 +1178,34 @@ mod tests {
                 path: PathBuf::from(path.to_string()),
                 file_format: "tbl".to_string(),
                 mem_table: false,
+                output_path: None,
             };
             let actual = benchmark_datafusion(opt).await?;
 
-            // assert schema equality without comparing nullable values
-            assert_eq!(
-                nullable_schema(expected[0].schema()),
-                nullable_schema(actual[0].schema())
-            );
+            let transformed = transform_actual_result(actual, n).await?;
+
+            // assert schema data types match
+            let transformed_fields = &transformed[0].schema().fields;
+            let expected_fields = &expected[0].schema().fields;
+            let schema_matches = transformed_fields
+                .iter()
+                .zip(expected_fields.iter())
+                .all(|(t, e)| match t.data_type() {
+                    DataType::Decimal128(_, _) => {
+                        matches!(e.data_type(), DataType::Decimal128(_, _))
+                    }
+                    data_type => data_type == e.data_type(),
+                });
+            assert!(schema_matches);
 
             // convert both datasets to Vec<Vec<String>> for simple comparison
             let expected_vec = result_vec(&expected);
-            let actual_vec = result_vec(&actual);
+            let actual_vec = result_vec(&transformed);
 
             // basic result comparison
             assert_eq!(expected_vec.len(), actual_vec.len());
 
-            // compare each row. this works as all TPC-H queries have determinisically ordered results
+            // compare each row. this works as all TPC-H queries have deterministically ordered results
             for i in 0..actual_vec.len() {
                 assert_eq!(expected_vec[i], actual_vec[i]);
             }
@@ -1260,96 +1214,5 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    mod ballista_round_trip {
-        use super::*;
-        use ballista_core::serde::protobuf;
-        use datafusion::physical_plan::ExecutionPlan;
-        use std::convert::TryInto;
-
-        async fn round_trip_query(n: usize) -> Result<()> {
-            let config = ExecutionConfig::new()
-                .with_target_partitions(1)
-                .with_batch_size(10);
-            let mut ctx = ExecutionContext::with_config(config);
-
-            // set tpch_data_path to dummy value and skip physical plan serde test when TPCH_DATA
-            // is not set.
-            let tpch_data_path =
-                env::var("TPCH_DATA").unwrap_or_else(|_| "./".to_string());
-
-            for &table in TABLES {
-                let schema = get_schema(table);
-                let options = CsvReadOptions::new()
-                    .schema(&schema)
-                    .delimiter(b'|')
-                    .has_header(false)
-                    .file_extension(".tbl");
-                let listing_options = options.to_listing_options(1);
-                let provider = ListingTable::new(
-                    Arc::new(LocalFileSystem {}),
-                    format!("{}/{}.tbl", tpch_data_path, table),
-                    Arc::new(schema),
-                    listing_options,
-                );
-                ctx.register_table(table, Arc::new(provider))?;
-            }
-
-            // test logical plan round trip
-            let plan = create_logical_plan(&mut ctx, n)?;
-            let proto: protobuf::LogicalPlanNode = (&plan).try_into().unwrap();
-            let round_trip: LogicalPlan = (&proto).try_into().unwrap();
-            assert_eq!(
-                format!("{:?}", plan),
-                format!("{:?}", round_trip),
-                "logical plan round trip failed"
-            );
-
-            // test optimized logical plan round trip
-            let plan = ctx.optimize(&plan)?;
-            let proto: protobuf::LogicalPlanNode = (&plan).try_into().unwrap();
-            let round_trip: LogicalPlan = (&proto).try_into().unwrap();
-            assert_eq!(
-                format!("{:?}", plan),
-                format!("{:?}", round_trip),
-                "optimized logical plan round trip failed"
-            );
-
-            // test physical plan roundtrip
-            if env::var("TPCH_DATA").is_ok() {
-                let physical_plan = ctx.create_physical_plan(&plan).await?;
-                let proto: protobuf::PhysicalPlanNode =
-                    (physical_plan.clone()).try_into().unwrap();
-                let round_trip: Arc<dyn ExecutionPlan> = (&proto).try_into().unwrap();
-                assert_eq!(
-                    format!("{:?}", physical_plan),
-                    format!("{:?}", round_trip),
-                    "physical plan round trip failed"
-                );
-            }
-
-            Ok(())
-        }
-
-        macro_rules! test_round_trip {
-            ($tn:ident, $query:expr) => {
-                #[tokio::test]
-                async fn $tn() -> Result<()> {
-                    round_trip_query($query).await
-                }
-            };
-        }
-
-        test_round_trip!(q1, 1);
-        test_round_trip!(q3, 3);
-        test_round_trip!(q5, 5);
-        test_round_trip!(q6, 6);
-        test_round_trip!(q7, 7);
-        test_round_trip!(q8, 8);
-        test_round_trip!(q9, 9);
-        test_round_trip!(q10, 10);
-        test_round_trip!(q12, 12);
-        test_round_trip!(q13, 13);
     }
 }

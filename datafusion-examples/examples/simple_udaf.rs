@@ -23,13 +23,13 @@ use datafusion::arrow::{
 };
 
 use datafusion::from_slice::FromSlice;
-use datafusion::physical_plan::functions::Volatility;
+use datafusion::logical_expr::AggregateState;
 use datafusion::{error::Result, logical_plan::create_udaf, physical_plan::Accumulator};
-use datafusion::{prelude::*, scalar::ScalarValue};
+use datafusion::{logical_expr::Volatility, prelude::*, scalar::ScalarValue};
 use std::sync::Arc;
 
-// create local execution context with an in-memory table
-fn create_context() -> Result<ExecutionContext> {
+// create local session context with an in-memory table
+fn create_context() -> Result<SessionContext> {
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::datasource::MemTable;
     // define a schema.
@@ -46,7 +46,7 @@ fn create_context() -> Result<ExecutionContext> {
     )?;
 
     // declare a new context. In spark API, this corresponds to a new spark SQLsession
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
     // declare a table in memory. In spark API, this corresponds to createDataFrame(...).
     let provider = MemTable::try_new(schema, vec![vec![batch1], vec![batch2]])?;
@@ -108,10 +108,10 @@ impl Accumulator for GeometricMean {
     // This function serializes our state to `ScalarValue`, which DataFusion uses
     // to pass this state between execution stages.
     // Note that this can be arbitrary data.
-    fn state(&self) -> Result<Vec<ScalarValue>> {
+    fn state(&self) -> Result<Vec<AggregateState>> {
         Ok(vec![
-            ScalarValue::from(self.prod),
-            ScalarValue::from(self.n),
+            AggregateState::Scalar(ScalarValue::from(self.prod)),
+            AggregateState::Scalar(ScalarValue::from(self.n)),
         ])
     }
 
@@ -128,7 +128,7 @@ impl Accumulator for GeometricMean {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         if values.is_empty() {
             return Ok(());
-        };
+        }
         (0..values[0].len()).try_for_each(|index| {
             let v = values
                 .iter()
@@ -144,7 +144,7 @@ impl Accumulator for GeometricMean {
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
-        };
+        }
         (0..states[0].len()).try_for_each(|index| {
             let v = states
                 .iter()
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
         Arc::new(DataType::Float64),
         Volatility::Immutable,
         // This is the accumulator factory; DataFusion uses it to create new accumulators.
-        Arc::new(|| Ok(Box::new(GeometricMean::new()))),
+        Arc::new(|_| Ok(Box::new(GeometricMean::new()))),
         // This is the description of the state. `state()` must match the types here.
         Arc::new(vec![DataType::Float64, DataType::UInt32]),
     );

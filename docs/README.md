@@ -17,7 +17,11 @@
   under the License.
 -->
 
-# DataFusion docs
+# DataFusion Documentation
+
+This folder contains the source content of the [User Guide](./source/user-guide)
+and [Contributor Guide](./source/contributor-guide). These are both published to
+https://arrow.apache.org/datafusion/ as part of the release process.
 
 ## Dependencies
 
@@ -26,21 +30,35 @@ inside a Python virtualenv.
 
 - Python
 - `pip install -r requirements.txt`
-- Datafusion python package. You can install the latest version by running `maturin develop` inside `../python` directory.
 
-## Build
+## Build & Preview
+
+Run the provided script to build the HTML pages.
 
 ```bash
-make html
+./build.sh
 ```
 
-## Release
+The HTML will be generated into a `build` directory.
+
+Preview the site on Linux by running this command.
+
+```bash
+firefox build/html/index.html
+```
+
+## Release Process
 
 The documentation is served through the
 [arrow-site](https://github.com/apache/arrow-site/) repo. To release a new
 version of the docs, follow these steps:
 
-- Run `make html` inside `docs` folder to generate the docs website inside the `build/html` folder.
-- Clone the arrow-site repo and checkout to the `asf-site` branch
-- Copy build artifacts into `arrow-site` repo's `datafusion` folder: `'cp' -rT ./build/html/ ../arrow-site/datafusion/`
-- Commit changes in `arrow-site` and send a PR.
+1. Run `./build.sh` inside `docs` folder to generate the docs website inside the `build/html` folder.
+2. Clone the arrow-site repo
+3. Checkout to the `asf-site` branch (NOT `master`)
+4. Copy build artifacts into `arrow-site` repo's `datafusion` folder with a command such as
+
+- `cp -rT ./build/html/ ../../arrow-site/datafusion/` (doesn't work on mac)
+- `rsync -avzr ./build/html/ ../../arrow-site/datafusion/`
+
+5. Commit changes in `arrow-site` and send a PR.

@@ -21,6 +21,11 @@ SQL Reference
 .. toctree::
    :maxdepth: 2
 
+   data_types
    select
+   subqueries
    ddl
-   DataFusion Functions <datafusion-functions>
+   information_schema
+   aggregate_functions
+   scalar_functions
+   sql_status

@@ -17,7 +17,7 @@
   under the License.
 -->
 
-# DataFusion and Ballista Benchmarks
+# DataFusion Benchmarks
 
 This crate contains benchmarks based on popular public data sets and open source benchmark suites, making it easy to
 run real-world benchmarks to help with performance and scalability testing and for comparing performance with other Arrow
@@ -25,7 +25,8 @@ implementations as well as other query engines.
 
 ## Benchmark derived from TPC-H
 
-These benchmarks are derived from the [TPC-H][1] benchmark.
+These benchmarks are derived from the [TPC-H][1] benchmark. And we use this repo as the source of tpch-gen and answers: 
+https://github.com/databricks/tpch-dbgen.git, based on [2.17.1](https://www.tpc.org/tpc_documents_current_versions/pdf/tpc-h_v2.17.1.pdf) version of TPC-H.
 
 ## Generating Test Data
 
@@ -33,7 +34,8 @@ TPC-H data can be generated using the `tpch-gen.sh` script, which creates a Dock
 generator.
 
 ```bash
-./tpch-gen.sh
+# scale_factor: scale of the database population. scale 1.0 represents ~1 GB of data
+./tpch-gen.sh <scale_factor>
 ```
 
 Data will be generated into the `data` subdirectory and will not be checked in because this directory has been added
@@ -47,7 +49,7 @@ The benchmark can then be run (assuming the data created from `dbgen` is in `./d
 cargo run --release --bin tpch -- benchmark datafusion --iterations 3 --path ./data --format tbl --query 1 --batch-size 4096
 ```
 
-You can enable the features `simd` (to use SIMD instructions) and/or `mimalloc` or `snmalloc` (to use either the mimalloc or snmalloc allocator) as features by passing them in as `--features`:
+You can enable the features `simd` (to use SIMD instructions, `cargo nightly` is required.) and/or `mimalloc` or `snmalloc` (to use either the mimalloc or snmalloc allocator) as features by passing them in as `--features`:
 
 ```
 cargo run --release --features "simd mimalloc" --bin tpch -- benchmark datafusion --iterations 3 --path ./data --format tbl --query 1 --batch-size 4096
@@ -60,88 +62,7 @@ The benchmark program also supports CSV and Parquet input file formats and a uti
 cargo run --release --bin tpch -- convert --input ./data --output /mnt/tpch-parquet --format parquet
 ```
 
-This utility does not yet provide support for changing the number of partitions when performing the conversion. Another
-option is to use the following Docker image to perform the conversion from `tbl` files to CSV or Parquet.
-
-```bash
-docker run -it ballistacompute/spark-benchmarks:0.4.0-SNAPSHOT
-  -h, --help   Show help message
-
-Subcommand: convert-tpch
-  -i, --input  <arg>
-      --input-format  <arg>
-  -o, --output  <arg>
-      --output-format  <arg>
-  -p, --partitions  <arg>
-  -h, --help                   Show help message
-```
-
-Note that it is necessary to mount volumes into the Docker container as appropriate so that the file conversion process
-can access files on the host system.
-
-Here is a full example that assumes that data is stored in the `/mnt` path on the host system.
-
-```bash
-docker run -v /mnt:/mnt -it ballistacompute/spark-benchmarks:0.4.0-SNAPSHOT \
-  convert-tpch \
-  --input /mnt/tpch/csv \
-  --input-format tbl \
-  --output /mnt/tpch/parquet \
-  --output-format parquet \
-  --partitions 64
-```
-
-## Running the Ballista Benchmarks
-
-To run the benchmarks it is necessary to have at least one Ballista scheduler and one Ballista executor running.
-
-To run the scheduler from source:
-
-```bash
-cd $ARROW_HOME/ballista/rust/scheduler
-RUST_LOG=info cargo run --release
-```
-
-By default the scheduler will bind to `0.0.0.0` and listen on port 50050.
-
-To run the executor from source:
-
-```bash
-cd $ARROW_HOME/ballista/rust/executor
-RUST_LOG=info cargo run --release
-```
-
-By default the executor will bind to `0.0.0.0` and listen on port 50051.
-
-You can add SIMD/snmalloc/LTO flags to improve speed (with longer build times):
-
-```
-RUST_LOG=info RUSTFLAGS='-C target-cpu=native -C lto -C codegen-units=1 -C embed-bitcode' cargo run --release --bin executor --features "simd snmalloc" --target x86_64-unknown-linux-gnu
-```
-
-To run the benchmarks:
-
-```bash
-cd $ARROW_HOME/benchmarks
-cargo run --release --bin tpch benchmark ballista --host localhost --port 50050 --query 1 --path $(pwd)/data --format tbl
-```
-
-## Running the Ballista Benchmarks on docker-compose
-
-To start a Rust scheduler and executor using Docker Compose:
-
-```bash
-cd $ARROW_HOME
-./dev/build-rust.sh
-cd $ARROW_HOME/benchmarks
-docker-compose up
-```
-
-Then you can run the benchmark with:
-
-```bash
-docker-compose run ballista-client bash -c '/tpch benchmark ballista --host ballista-scheduler --port 50050 --query 1 --path /data --format tbl'
-```
+Or if you want to verify and run all the queries in the benchmark, you can just run `cargo test`.
 
 ## Expected output
 
@@ -178,19 +99,29 @@ Query 'fare_amt_by_passenger' iteration 1 took 7599 ms
 Query 'fare_amt_by_passenger' iteration 2 took 7969 ms
 ```
 
-## Running the Ballista Loadtest
+## h2o benchmarks
 
 ```bash
- cargo run --bin tpch -- loadtest  ballista-load 
-  --query-list 1,3,5,6,7,10,12,13 
-  --requests 200 
-  --concurrency 10  
-  --data-path /**** 
-  --format parquet 
-  --host localhost 
-  --port 50050 
-  --sql-path /***
-  --debug
+cargo run --release --bin h2o group-by --query 1 --path /mnt/bigdata/h2oai/N_1e7_K_1e2_single.csv --mem-table --debug
+```
+
+Example run:
+
+```
+Running benchmarks with the following options: GroupBy(GroupBy { query: 1, path: "/mnt/bigdata/h2oai/N_1e7_K_1e2_single.csv", debug: false })
+Executing select id1, sum(v1) as v1 from x group by id1
++-------+--------+
+| id1   | v1     |
++-------+--------+
+| id063 | 199420 |
+| id094 | 200127 |
+| id044 | 198886 |
+...
+| id093 | 200132 |
+| id003 | 199047 |
++-------+--------+
+
+h2o groupby query 1 took 1669 ms
 ```
 
 [1]: http://www.tpc.org/tpch/

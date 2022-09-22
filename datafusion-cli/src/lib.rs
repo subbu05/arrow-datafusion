@@ -16,11 +16,9 @@
 // under the License.
 
 #![doc = include_str!("../README.md")]
-#![allow(unused_imports)]
 pub const DATAFUSION_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod command;
-pub mod context;
 pub mod exec;
 pub mod functions;
 pub mod helper;

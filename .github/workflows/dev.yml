@@ -19,33 +19,15 @@ name: Dev
 on: [push, pull_request]
 
 jobs:
-  lint:
-    name: Lint C++, Python, R, Rust, Docker
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Arrow
-        uses: actions/checkout@v2
-        with:
-          repository: apache/arrow
-          submodules: true
-          fetch-depth: 0
-      - name: Setup Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: "3.10"
-      - name: Setup Archery
-        run: pip install -e dev/archery[lint]
-      - name: Lint
-        run: archery lint --rat
 
   rat:
     name: Release Audit Tool (RAT)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: "3.10"
       - name: Audit licenses
@@ -55,8 +37,8 @@ jobs:
     name: Use prettier to check formatting of documents
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-node@v2
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
         with:
           node-version: "14"
       - name: Prettier check
@@ -66,9 +48,8 @@ jobs:
           #
           # ignore subproject CHANGELOG.md because they are machine generated
           npx prettier@2.3.2 --write \
-            '{ballista,datafusion,datafusion-examples,docs,python}/**/*.md' \
-            '!{ballista,datafusion,python}/CHANGELOG.md' \
+            '{datafusion,datafusion-cli,datafusion-examples,dev,docs}/**/*.md' \
+            '!datafusion/CHANGELOG.md' \
             README.md \
-            DEVELOPERS.md \
-            'ballista/**/*.{ts,tsx}'
+            CONTRIBUTING.md
           git diff --exit-code

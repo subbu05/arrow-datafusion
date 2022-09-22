@@ -19,9 +19,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow_flight::SchemaAsIpc;
+use datafusion::arrow::error::ArrowError;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::ListingOptions;
-use datafusion::datasource::object_store::local::LocalFileSystem;
+use datafusion::datasource::listing::{ListingOptions, ListingTableUrl};
 use futures::Stream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
@@ -68,14 +68,19 @@ impl FlightService for FlightServiceImpl {
         let request = request.into_inner();
 
         let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()));
+        let table_path =
+            ListingTableUrl::parse(&request.path[0]).map_err(to_tonic_err)?;
 
+        let ctx = SessionContext::new();
         let schema = listing_options
-            .infer_schema(Arc::new(LocalFileSystem {}), &request.path[0])
+            .infer_schema(&ctx.state(), &table_path)
             .await
             .unwrap();
 
         let options = datafusion::arrow::ipc::writer::IpcWriteOptions::default();
-        let schema_result = SchemaAsIpc::new(&schema, &options).into();
+        let schema_result = SchemaAsIpc::new(&schema, &options)
+            .try_into()
+            .map_err(|e: ArrowError| tonic::Status::internal(e.to_string()))?;
 
         Ok(Response::new(schema_result))
     }
@@ -90,14 +95,15 @@ impl FlightService for FlightServiceImpl {
                 println!("do_get: {}", sql);
 
                 // create local execution context
-                let mut ctx = ExecutionContext::new();
+                let ctx = SessionContext::new();
 
-                let testdata = datafusion::arrow::util::test_util::parquet_test_data();
+                let testdata = datafusion::test_util::parquet_test_data();
 
                 // register parquet file with the execution context
                 ctx.register_parquet(
                     "alltypes_plain",
                     &format!("{}/alltypes_plain.parquet", testdata),
+                    ParquetReadOptions::default(),
                 )
                 .await
                 .map_err(to_tonic_err)?;

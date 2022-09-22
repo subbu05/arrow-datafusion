@@ -80,10 +80,10 @@ echo ""
 echo "---------------------------------------------------------"
 cat <<MAIL
 To: dev@arrow.apache.org
-Subject: [VOTE][RUST][Datafusion] Release Apache Arrow Datafusion ${version} RC${rc}
+Subject: [VOTE][RUST][DataFusion] Release Apache Arrow DataFusion ${version} RC${rc}
 Hi,
 
-I would like to propose a release of Apache Arrow Datafusion Implementation,
+I would like to propose a release of Apache Arrow DataFusion Implementation,
 version ${version}.
 
 This release candidate is based on commit: ${release_hash} [1]
@@ -98,9 +98,13 @@ encouraged to test the release and vote with "(non-binding)".
 
 The standard verification procedure is documented at https://github.com/apache/arrow-datafusion/blob/master/dev/release/README.md#verifying-release-candidates.
 
-[ ] +1 Release this as Apache Arrow Datafusion ${version}
+[ ] +1 Release this as Apache Arrow DataFusion ${version}
 [ ] +0
-[ ] -1 Do not release this as Apache Arrow Datafusion ${version} because...
+[ ] -1 Do not release this as Apache Arrow DataFusion ${version} because...
+
+Here is my vote:
+
++1
 
 [1]: https://github.com/apache/arrow-datafusion/tree/${release_hash}
 [2]: ${url}
@@ -125,15 +129,8 @@ gpg --armor --output ${tarball}.asc --detach-sig ${tarball}
 (cd ${distdir} && shasum -a 256 ${tarname}) > ${tarball}.sha256
 (cd ${distdir} && shasum -a 512 ${tarname}) > ${tarball}.sha512
 
-# download python binary releases from Github Action
-python_distdir=${distdir}/python
-echo "Preparing python release artifacts"
-test -d ${python_distdir} || mkdir -p ${python_distdir}
-pushd "${python_distdir}"
-    python ${SOURCE_DIR}/download-python-wheels.py "${tag}"
-popd
 
 echo "Uploading to apache dist/dev to ${url}"
 svn co --depth=empty https://dist.apache.org/repos/dist/dev/arrow ${SOURCE_TOP_DIR}/dev/dist
 svn add ${distdir}
-svn ci -m "Apache Arrow Datafusion ${version} ${rc}" ${distdir}
+svn ci -m "Apache Arrow DataFusion ${version} ${rc}" ${distdir}

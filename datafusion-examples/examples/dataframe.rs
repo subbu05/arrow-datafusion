@@ -23,15 +23,15 @@ use datafusion::prelude::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     // create local execution context
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
-    let testdata = datafusion::arrow::util::test_util::parquet_test_data();
+    let testdata = datafusion::test_util::parquet_test_data();
 
     let filename = &format!("{}/alltypes_plain.parquet", testdata);
 
     // define the query using the DataFrame trait
     let df = ctx
-        .read_parquet(filename)
+        .read_parquet(filename, ParquetReadOptions::default())
         .await?
         .select_columns(&["id", "bool_col", "timestamp_col"])?
         .filter(col("id").gt(lit(1)))?;
